@@ -1,0 +1,259 @@
+<script>
+import wepy from 'wepy'
+import api from './utils/api'
+import 'wepy-async-function'
+
+export default class extends wepy.app {
+  config = {
+    pages: [
+      'pages/home',
+      'pages/me'
+    ],
+    window: {
+      navigationBarBackgroundColor: '#fff',
+      navigationBarTitleText: '投资中心',
+      navigationBarTextStyle: 'black',
+      backgroundTextStyle: 'black'
+    },
+    tabBar: {
+      color: '#bdbdbd',
+      selectedColor: '#0c98e9',
+      backgroundColor: '#ffffff',
+      borderStyle: 'white',
+      list: [{
+        pagePath: 'pages/home',
+        text: '首页',
+        iconPath: 'images/icon_home.png',
+        selectedIconPath: 'images/icon_home_active.png'
+      }, {
+        pagePath: 'pages/me',
+        text: '我',
+        iconPath: 'images/icon_me.png',
+        selectedIconPath: 'images/icon_me_active.png'
+      }]
+    }
+  }
+
+  globalData = {
+    userInfo: {
+      jwt: '',
+      avatar: '',
+      cityId: null,
+      id: null,
+      name: '',
+      phone: ''
+    },
+    loginPromise: null,
+    loginPromiseResolve: null
+  }
+
+  constructor () {
+    super()
+    this.use('requestfix')
+    this.use('promisify')
+    // 拦截request请求
+    this.intercept('request', {
+      config (p) {
+        p.header = {
+          'content-type': 'application/json',
+          'jwt': this.globalData.userInfo.jwt
+          // ,'deviceId': '2.1.3',
+          // 'abpublish': JSON.stringify({
+          //   version: 'maorui',
+          //   members: [{
+          //     serverVersion: 'maorui',
+          //     serverHostport: '192.168.1.250:21755',
+          //     targetServer: 'eis-server'
+          //   }, {
+          //     serverVersion: 'maorui',
+          //     serverHostport: '192.168.1.250:21003',
+          //     targetServer: 'account-server'
+          //   }]
+          // })
+        }
+        return p
+      },
+
+      success (p) {
+        if (p.statusCode === 404) {
+          p.data.errormsg = p.data.path + ' | 请求路径404'
+        } else {
+          // 网关（zuul server）错误
+          if (p.data.status === 500) {
+            wx.showToast({
+              title: '服务器迷路了~',
+              icon: 'none'
+            })
+            return {
+              errormsg: '服务器迷路了~',
+              state: -1000
+            }
+          }
+          // 各种空指针抛出的异常
+          if (p.data.state === -1) {
+            p.data.errormsg = '服务端又拿空指针搞事情~'
+          }
+        }
+        return p.data
+      },
+
+      fail (p) {
+        wepy.showToast({
+          title: '服务器开小差了~',
+          icon: 'none'
+        })
+        return p
+      }
+    })
+  }
+
+  onLaunch() {
+    // 初始化版本更新
+    this.initUpdateManager()
+    this.globalData.loginPromise = new Promise((resolve, reject) => {
+      this.globalData.loginPromiseResolve = resolve
+    })
+  }
+
+  onShow() {
+    wepy.checkSession().then(
+      res => {
+        let _unionid = wepy.getStorageSync('unionid')
+        if (!_unionid) {
+          this.auth()
+        } else {
+          this.login(_unionid)
+        }
+      },
+      () => {
+        this.auth()
+      }
+    )
+  }
+
+  onHide () {
+    this.saveFormIds()
+  }
+
+  // 暂存formId
+  stashFormId = (formId) => {
+    if (formId && formId !== 'the formId is a mock one') {
+      this.globalData.formIds.push({
+        key: formId,
+        expireTime: Date.now() + 1000 * 60 * 60 * 24 * 7 - 5000
+      })
+    }
+  }
+
+  // 保存formIds
+  saveFormIds () {
+    let formIds = this.globalData.formIds
+    if (formIds.length) {
+      api.saveFormIds(formIds)
+        .then(res => {
+          this.globalData.formIds = []
+        })
+    }
+  }
+
+  // 授权
+  auth() {
+    wepy.login().then(res => {
+      let params = {
+        code: res.code,
+        platformId: 2
+      }
+      api.getSession(params).then(res => {
+        if (res.state === 1000) {
+          wepy.setStorageSync('openid', res.data.openid)
+          wepy.setStorageSync('unionid', res.data.unionid)
+          this.login(res.data.unionid)
+        } else {
+          wepy.showToast({
+            title: res.errormsg,
+            icon: 'none'
+          })
+        }
+      })
+    })
+  }
+
+  // 登录
+  login(unionid) {
+    return new Promise((resolve, reject) => {
+      api.login(unionid).then(async res => {
+        if (res.state === 1000 && res.data.id) {
+          let _data = res.data
+          this.globalData.userInfo.id = _data.id || null
+          this.globalData.userInfo.jwt = _data.jwt || ''
+          // 获取用户信息
+          await this.getUserInfo()
+
+          this.globalData.loginPromiseResolve()
+          resolve(true)
+        } else {
+          this.globalData.loginPromiseResolve()
+          resolve(false)
+        }
+      })
+    })
+  }
+
+  // 获取用户信息
+  getUserInfo () {
+    return new Promise((resolve, reject) => {
+      api.getUserInfo()
+        .then(res => {
+          if (res.state === 1000) {
+            let _data = res.data
+            this.globalData.userInfo.name = _data.name || ''
+            this.globalData.userInfo.phone = _data.phone || ''
+            this.globalData.userInfo.avatar = _data.avatar || ''
+            this.globalData.userInfo.cityId = _data.cityId || 0
+            resolve(true)
+          } else {
+            resolve(false)
+          }
+        })
+    })
+  }
+
+  // 初始化版本更新
+  initUpdateManager () {
+    if (wx.canIUse('getUpdateManager')) {
+      const updateManager = wx.getUpdateManager()
+
+      updateManager.onCheckForUpdate(res => {
+        // 请求完新版本信息的回调
+        console.log(res.hasUpdate)
+      })
+
+      updateManager.onUpdateReady(() => {
+        wx.showModal({
+          title: '更新提示',
+          content: '新版本已经准备好，是否重启应用？',
+          success: (res) => {
+            if (res.confirm) {
+              // 新的版本已经下载好，调用 applyUpdate 应用新版本并重启
+              updateManager.applyUpdate()
+            }
+          }
+        })
+      })
+
+      updateManager.onUpdateFailed(() => {
+        // 新的版本下载失败
+        wx.showModal({
+          title: '更新提示',
+          content: '新版本已经上线啦~，请您删除当前小程序，重新搜索打开哟~'
+        })
+      })
+    } else {
+      wx.showModal({
+        title: '提示',
+        content: '当前微信版本过低，无法使用该功能，请升级到最新微信版本后重试。'
+      })
+    }
+  }
+}
+</script>
